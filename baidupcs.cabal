@@ -21,6 +21,7 @@ library
                      , base16-bytestring
                      , cryptohash
                      , cryptohash-conduit
+                     , directory
                      , disk-free-space
                      , http-client
                      , http-client-tls

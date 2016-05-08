@@ -6,11 +6,11 @@ import Control.Concurrent.SSem
 import Crypto.Hash
 import Crypto.Hash.Conduit
 import Crypto.Hash.Types
-import Data.ByteString.Base16
 import Network.HTTP.Client hiding (fileSize)
 import Network.HTTP.Client.TLS
 import Network.HTTP.Types
-import System.IO (hSeek, IOMode(WriteMode), SeekMode(AbsoluteSeek), withBinaryFile)
+import System.Directory
+import System.IO (hSeek, hSetFileSize, IOMode(WriteMode), SeekMode(AbsoluteSeek), withBinaryFile)
 
 data GlobalConfig = GlobalConfig {
     accessToken :: !ByteString,
@@ -66,7 +66,6 @@ downloadChunk FileSession {..} l r = go
     where
         go = do
             let req = fileDefaultRequest { requestHeaders = (hRange, renderByteRanges [ByteRangeFromTo (fromIntegral l) (fromIntegral $ r-1)]):requestHeaders fileDefaultRequest }
-            print req
             catch (do
                 resp <- httpLbs req $ manager globalSession
                 let Status {..} = responseStatus resp
@@ -87,7 +86,12 @@ makeProgress fs@FileSession {..} l r = Concurrently $ do
         hPut fileHandle chunk
         modifyIORef' progressMeter $ \m -> m+r-l
         m <- readIORef progressMeter
-        putStr $ fileURL fileConfig ++ ": " ++ tshow m ++ " / " ++ tshow (fileSize fileConfig)
+        putStrLn $ fileURL fileConfig ++ ": " ++ tshow m ++ " / " ++ tshow (fileSize fileConfig)
+
+buildBigProgress :: FileSession -> Concurrently ()
+buildBigProgress fs@FileSession {fileConfig = FileConfig {..}, globalSession = GlobalSession {config = GlobalConfig {..}, ..}} = f 0 where
+    f l = if l + chunkSize >= fileSize then makeProgress fs l fileSize
+        else makeProgress fs l (l + chunkSize) *> f (l + chunkSize)
 
 downloadFile :: GlobalSession -> FileConfig -> IO ()
 downloadFile gs fc = do
@@ -109,7 +113,12 @@ downloadFile gs fc = do
             fileHandle = hdl,
             progressMeter = pm
         }
-        error "todo"
+        hSetFileSize hdl $ fromIntegral $ fileSize fc
+        runConcurrently $ buildBigProgress fs
+    flag <- verifyMD5 (filePath fc) (fileMD5 fc)
+    if flag then pure () else do
+        removeFile $ filePath fc
+        putStrLn $ pack (filePath fc) ++ ": MD5 mismatch"
 
 verifyMD5 :: FilePath -> ByteString -> IO Bool
 verifyMD5 path md5 = do
