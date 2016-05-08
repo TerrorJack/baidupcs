@@ -23,6 +23,7 @@ library
                      , http-client
                      , http-client-tls
                      , http-types
+                     , SafeSemaphore
   ghc-options:         -Wall
   default-extensions:  NoImplicitPrelude
                        OverloadedStrings

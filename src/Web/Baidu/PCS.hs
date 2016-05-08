@@ -12,20 +12,17 @@ import Network.HTTP.Types
 data GlobalConfig = GlobalConfig {
     accessToken :: !ByteString,
     chunkSize :: !Int,
-    filesPerJob :: !Int,
-    connsPerFile :: !Int,
+    connsLimit :: !Int,
     bandwidthQuota :: !Int,
-    fileRetryLimit :: !Int,
-    globalFailLimit :: !Int
+    retryLimit :: !Int
 }
 
 data GlobalSession = GlobalSession {
     config :: !GlobalConfig,
     manager :: !Manager,
-    stdoutLock :: !(MVar ()),
-    freeSpaceLock :: !(MVar ()),
     bandwidthMeter :: !(IORef Int),
-    globalFailMeter :: !(IORef Int)
+    retryMeter :: !(IORef Int),
+    progressLock :: !(MVar ())
 }
 
 data FileConfig = FileConfig {
@@ -37,11 +34,9 @@ data FileConfig = FileConfig {
 
 data FileSession = FileSession {
     globalSession :: !GlobalSession,
-    fileRetryMeter :: !(IORef Int),
     fileDefaultRequest :: !Request,
     fileConfig :: !FileConfig,
-    fileHandle :: Handle,
-    fileWriteLock :: !(MVar ())
+    fileHandle :: Handle
 }
 
 initGlobalSession :: GlobalConfig -> IO GlobalSession
@@ -50,19 +45,18 @@ initGlobalSession cfg = do
     sl <- newMVar ()
     fsl <- newMVar ()
     bm <- newIORef $ bandwidthQuota cfg
-    gfm <- newIORef $ globalFailLimit cfg
+    rm <- newIORef $ retryLimit cfg
+    pl <- newMVar ()
     pure GlobalSession {
         config = cfg,
         manager = mgr,
-        stdoutLock = sl,
-        freeSpaceLock = fsl,
         bandwidthMeter = bm,
-        globalFailMeter = gfm
+        retryMeter = rm,
+        progressLock = pl
     }
 
 initFileSession :: GlobalSession -> FileConfig -> IO FileSession
 initFileSession gs fc = do
-    frm <- newIORef $ (fileRetryLimit . config) gs
     let tok = (accessToken . config) gs
     req <- parseUrl "https://d.pcs.baidu.com/rest/2.0/pcs/file"
     let req' = req {
@@ -72,14 +66,11 @@ initFileSession gs fc = do
         cookieJar = Nothing,
         checkStatus = \_ _ _ -> Nothing
     }
-    fwl <- newMVar ()
+    pl <- newMVar ()
     pure FileSession {
         globalSession = gs,
-        fileRetryMeter = frm,
         fileDefaultRequest = req',
-        fileConfig = fc,
-        fileHandle = error "todo",
-        fileWriteLock = fwl
+        fileConfig = fc
     }
 
 -- Here we use [L,R), different from [L,R] in the original API
@@ -97,7 +88,7 @@ downloadChunk FileSession {..} l r = go
                     206 -> pure $ responseBody resp
                     _ -> retryChunk $ "Unidentified response: " ++ show resp) (\(e :: SomeException) -> retryChunk $ show e)
         retryChunk s = do
-            flag <- atomicModifyIORef' fileRetryMeter $ \m -> if m == 0 then (0,False) else (m-1,True)
+            flag <- atomicModifyIORef' (retryMeter globalSession) $ \m -> if m == 0 then (0,False) else (m-1,True)
             if flag then go else fail s
 
 downloadFile :: FileSession -> IO ()
