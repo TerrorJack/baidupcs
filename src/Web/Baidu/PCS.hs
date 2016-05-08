@@ -1,6 +1,7 @@
 module Web.Baidu.PCS where
 
 import ClassyPrelude.Conduit
+import Control.Concurrent.SSem
 import Crypto.Hash
 import Crypto.Hash.Conduit
 import Crypto.Hash.Types
@@ -22,7 +23,8 @@ data GlobalSession = GlobalSession {
     manager :: !Manager,
     bandwidthMeter :: !(IORef Int),
     retryMeter :: !(IORef Int),
-    progressLock :: !(MVar ())
+    progressLock :: !(MVar ()),
+    connSem :: !SSem
 }
 
 data FileConfig = FileConfig {
@@ -42,17 +44,17 @@ data FileSession = FileSession {
 initGlobalSession :: GlobalConfig -> IO GlobalSession
 initGlobalSession cfg = do
     mgr <- newManager tlsManagerSettings
-    sl <- newMVar ()
-    fsl <- newMVar ()
     bm <- newIORef $ bandwidthQuota cfg
     rm <- newIORef $ retryLimit cfg
     pl <- newMVar ()
+    cs <- new $ connsLimit cfg
     pure GlobalSession {
         config = cfg,
         manager = mgr,
         bandwidthMeter = bm,
         retryMeter = rm,
-        progressLock = pl
+        progressLock = pl,
+        connSem = cs
     }
 
 initFileSession :: GlobalSession -> FileConfig -> IO FileSession
@@ -66,7 +68,6 @@ initFileSession gs fc = do
         cookieJar = Nothing,
         checkStatus = \_ _ _ -> Nothing
     }
-    pl <- newMVar ()
     pure FileSession {
         globalSession = gs,
         fileDefaultRequest = req',
@@ -83,13 +84,17 @@ downloadChunk FileSession {..} l r = go
             catch (do
                 resp <- httpLbs req $ manager globalSession
                 let Status {..} = responseStatus resp
+                let yay = atomicModifyIORef' (retryMeter globalSession) (const (retryLimit $ config globalSession,())) $> responseBody resp
                 case statusCode of
-                    200 -> pure $ responseBody resp
-                    206 -> pure $ responseBody resp
+                    200 -> yay
+                    206 -> yay
                     _ -> retryChunk $ "Unidentified response: " ++ show resp) (\(e :: SomeException) -> retryChunk $ show e)
         retryChunk s = do
             flag <- atomicModifyIORef' (retryMeter globalSession) $ \m -> if m == 0 then (0,False) else (m-1,True)
             if flag then go else fail s
+
+makeProgress :: FileSession -> Int -> Int -> IO ()
+makeProgress = error "todo"
 
 downloadFile :: FileSession -> IO ()
 downloadFile = error "todo"
