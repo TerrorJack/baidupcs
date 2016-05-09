@@ -15,16 +15,12 @@ import System.IO (hSeek, hSetFileSize, IOMode(WriteMode), SeekMode(AbsoluteSeek)
 data GlobalConfig = GlobalConfig {
     accessToken :: !ByteString,
     chunkSize :: !Int,
-    connsLimit :: !Int,
-    bandwidthQuota :: !Int,
-    retryLimit :: !Int
+    connsLimit :: !Int
 }
 
 data GlobalSession = GlobalSession {
     config :: !GlobalConfig,
     manager :: !Manager,
-    bandwidthMeter :: !(IORef Int),
-    retryMeter :: !(IORef Int),
     progressLock :: !(MVar ()),
     connSem :: !SSem
 }
@@ -47,36 +43,27 @@ data FileSession = FileSession {
 initGlobalSession :: GlobalConfig -> IO GlobalSession
 initGlobalSession cfg = do
     mgr <- newManager tlsManagerSettings
-    bm <- newIORef $ bandwidthQuota cfg
-    rm <- newIORef $ retryLimit cfg
     pl <- newMVar ()
     cs <- new $ connsLimit cfg
     pure GlobalSession {
         config = cfg,
         manager = mgr,
-        bandwidthMeter = bm,
-        retryMeter = rm,
         progressLock = pl,
         connSem = cs
     }
 
 -- Here we use [L,R), different from [L,R] in the original API
 downloadChunk :: FileSession -> Int -> Int -> IO LByteString
-downloadChunk FileSession {..} l r = go
+downloadChunk FileSession {..} l r = catch go $ \(_ :: SomeException) -> go
     where
         go = do
             let req = fileDefaultRequest { requestHeaders = (hRange, renderByteRanges [ByteRangeFromTo (fromIntegral l) (fromIntegral $ r-1)]):requestHeaders fileDefaultRequest }
-            catch (do
-                resp <- httpLbs req $ manager globalSession
-                let Status {..} = responseStatus resp
-                let yay = atomicModifyIORef' (retryMeter globalSession) (const (retryLimit $ config globalSession,())) $> responseBody resp
-                case statusCode of
-                    200 -> yay
-                    206 -> yay
-                    _ -> retryChunk $ "Unidentified response: " ++ show resp) (\(e :: SomeException) -> retryChunk $ show e)
-        retryChunk s = do
-            flag <- atomicModifyIORef' (retryMeter globalSession) $ \m -> if m == 0 then (0,False) else (m-1,True)
-            if flag then go else fail s
+            resp <- httpLbs req $ manager globalSession
+            let Status {..} = responseStatus resp
+            case statusCode of
+                200 -> pure $ responseBody resp
+                206 -> pure $ responseBody resp
+                _ -> fail $ "Unidentified response: " ++ show resp
 
 makeProgress :: FileSession -> Int -> Int -> Concurrently ()
 makeProgress fs@FileSession {..} l r = Concurrently $ do
